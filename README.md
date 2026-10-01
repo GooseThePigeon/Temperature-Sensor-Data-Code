@@ -5,4 +5,4 @@ This code reads data from a serial port on your device and displays that data in
 2) click "connect" in the top right corner of the program and select the correct port.
 3) select a reasonable timescale and the data should be rolling in. :)
 
-Here is the link to the working program: (https://goosethepigeon.github.io/Temperature-Sensor-Data-Code/) Use this.
+Here is the link to the working program: (https://goosethepigeon.github.io/Temperature-Sensor-Data-Code/ir-sensor-graph.html) Use this.
