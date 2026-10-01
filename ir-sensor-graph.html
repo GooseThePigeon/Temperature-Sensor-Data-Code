@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IR Sensor Graph</title>
+<style>
+  :root {
+    --bg: #f5f7f8; --panel: #ffffff; --ink: #1c2529; --muted: #5f6d73;
+    --grid: #e1e6e8; --amb: #2f7fb5; --obj: #d2452b; --ok: #2e8b57; --line: #cfd6d9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14191c; --panel: #1c2327; --ink: #e8edef; --muted: #93a1a8;
+            --grid: #2b353a; --amb: #5ea9dc; --obj: #ff7a5c; --ok: #4cc58a; --line: #37434a; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.4 system-ui, "Segoe UI", sans-serif;
+         display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  h1 { font-size: 1.25rem; margin: 0 auto 0 0; font-weight: 650; }
+  .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .9rem; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+  .dot.on { background: var(--ok); }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  button:focus-visible, select:focus-visible { outline: 3px solid var(--amb); outline-offset: 2px; }
+  button:disabled { opacity: .5; cursor: default; }
+  select { font: inherit; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); }
+  .readouts { display: flex; flex-wrap: wrap; gap: 24px; }
+  .readout b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .readout span { color: var(--muted); font-size: .9rem; }
+  .readout.amb b { color: var(--amb); } .readout.obj b { color: var(--obj); }
+  .chart { flex: 1; min-height: 240px; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #msg { color: var(--muted); font-size: .9rem; min-height: 1.3em; }
+  #msg.err { color: var(--obj); }
+</style>
+</head>
+<body>
+<header>
+  <h1>IR sensor temperature</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="state">Not connected</span></div>
+  <label>Window
+    <select id="win">
+      <option value="30">30 s</option>
+      <option value="60" selected>1 min</option>
+      <option value="300">5 min</option>
+      <option value="1800">30 min</option>
+    </select>
+  </label>
+  <select id="unit" aria-label="Units"><option value="C">°C</option><option value="F">°F</option></select>
+  <button id="csv" disabled>Download CSV</button>
+  <button id="clear">Clear</button>
+  <button id="conn" class="primary">Connect sensor</button>
+</header>
+
+<div class="readouts">
+  <div class="readout obj"><b id="vo">--</b><span>Object</span></div>
+  <div class="readout amb"><b id="va">--</b><span>Ambient</span></div>
+</div>
+
+<div class="chart"><canvas id="cv"></canvas></div>
+<div id="msg">Plug in the Arduino, then select Connect sensor and choose its port.</div>
+
+<script>
+const BAUD = 9600;            // must match Serial.begin() in the sketch
+const MAX_POINTS = 200000;
+let port, reader, keepReading = false;
+let data = [];                  // {t: seconds since start, a: ambient C, o: object C}
+let t0 = null;
+
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function setState(on, text) {
+  $('dot').classList.toggle('on', on);
+  $('state').textContent = text;
+  $('conn').textContent = on ? 'Disconnect' : 'Connect sensor';
+}
+function msg(text, err) { const m = $('msg'); m.textContent = text; m.classList.toggle('err', !!err); }
+
+const conv = c => $('unit').value === 'F' ? c * 9 / 5 + 32 : c;
+const fmt = c => conv(c).toFixed(1);
+
+function handleLine(line) {
+  const parts = line.trim().split(',');
+  if (parts.length < 2) return;
+  const a = parseFloat(parts[0]), o = parseFloat(parts[1]);
+  if (!isFinite(a) || !isFinite(o)) return;
+  const now = performance.now() / 1000;
+  if (t0 === null) t0 = now;
+  data.push({ t: now - t0, a, o });
+  if (data.length > MAX_POINTS) data.shift();
+  $('va').textContent = fmt(a) + '°';
+  $('vo').textContent = fmt(o) + '°';
+  $('csv').disabled = false;
+}
+
+async function connect() {
+  if (!('serial' in navigator)) {
+    msg('This browser does not support Web Serial. Open this page in Chrome or Edge.', true);
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: BAUD });
+  } catch (e) {
+    msg(e.name === 'NotFoundError' ? 'No port selected.' :
+        'Could not open the port. Close the Arduino IDE serial monitor or plotter and try again.', true);
+    return;
+  }
+  setState(true, 'Connected');
+  msg('Connected. The Arduino restarts when the port opens, so data starts in 1 to 2 seconds.');
+  keepReading = true;
+  readLoop();
+}
+
+async function readLoop() {
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (port.readable && keepReading) {
+    reader = port.readable.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      }
+    } catch (e) {
+      if (keepReading) msg('Connection lost. Check the USB cable, then reconnect.', true);
+      keepReading = false;
+    } finally { reader.releaseLock(); }
+  }
+  try { await port.close(); } catch (e) {}
+  setState(false, 'Not connected');
+}
+
+async function disconnect() {
+  keepReading = false;
+  try { await reader.cancel(); } catch (e) {}
+}
+
+$('conn').onclick = () => keepReading ? disconnect() : connect();
+$('clear').onclick = () => { data = []; t0 = null; $('va').textContent = $('vo').textContent = '--'; $('csv').disabled = true; };
+$('csv').onclick = () => {
+  const rows = ['seconds,ambient_C,object_C', ...data.map(d => `${d.t.toFixed(2)},${d.a},${d.o}`)];
+  const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = 'ir-sensor-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.csv';
+  a.click(); URL.revokeObjectURL(url);
+};
+$('unit').onchange = () => { const d = data[data.length - 1]; if (d) { $('va').textContent = fmt(d.a) + '°'; $('vo').textContent = fmt(d.o) + '°'; } };
+
+// ---- drawing ----
+function niceStep(range) {
+  const raw = range / 5, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
+  return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p;
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const L = 48, R = 12, T = 12, B = 28, pw = w - L - R, ph = h - T - B;
+  const span = +$('win').value;
+  const tEnd = data.length ? Math.max(data[data.length - 1].t, span) : span;
+  const tStart = tEnd - span;
+  const vis = data.filter(d => d.t >= tStart - 1);
+
+  let lo = Infinity, hi = -Infinity;
+  for (const d of vis) { lo = Math.min(lo, conv(d.a), conv(d.o)); hi = Math.max(hi, conv(d.a), conv(d.o)); }
+  if (!isFinite(lo)) { lo = 20; hi = 30; }
+  if (hi - lo < 2) { const m = (hi + lo) / 2; lo = m - 1; hi = m + 1; }
+  const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+
+  const X = t => L + (t - tStart) / span * pw;
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * ph;
+
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.lineWidth = 1; ctx.strokeStyle = css('--grid'); ctx.fillStyle = css('--muted');
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const step = niceStep(hi - lo);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    const y = Math.round(Y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+    ctx.fillText(v.toFixed(step < 1 ? 1 : 0), L - 6, y);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const tstep = span <= 30 ? 5 : span <= 60 ? 10 : span <= 300 ? 60 : 300;
+  for (let t = Math.ceil(tStart / tstep) * tstep; t <= tEnd; t += tstep) {
+    const x = Math.round(X(t)) + .5;
+    ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke();
+    ctx.fillText(t >= 60 ? Math.floor(t / 60) + ':' + String(Math.round(t % 60)).padStart(2, '0') : t + 's', x, T + ph + 6);
+  }
+
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T, pw, ph); ctx.clip();
+  ctx.lineWidth = 2; ctx.lineJoin = 'round';
+  for (const [key, color] of [['a', '--amb'], ['o', '--obj']]) {
+    ctx.strokeStyle = css(color); ctx.beginPath();
+    vis.forEach((d, i) => { const x = X(d.t), y = Y(conv(d[key])); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
+  ctx.restore();
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+if ('serial' in navigator) {
+  navigator.serial.addEventListener('disconnect', () => { if (keepReading) { keepReading = false; } });
+}
+</script>
+</body>
+</html>
