@@ -1,0 +1,1 @@
+This code reads data from a serial port on your device and displays that data in graphical form. If it isn't working, check that no other program is using the port that the experiment is plugged into (could be arduino IDE or other programs like it).
