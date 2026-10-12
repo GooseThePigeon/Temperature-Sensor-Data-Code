@@ -72,6 +72,7 @@ const MAX_POINTS = 200000;
 let port, reader, keepReading = false;
 let data = [];                  // {t: seconds since start, a: ambient C, o: object C}
 let t0 = null;
+let ambientFixed = null;        // first ambient reading, then locked
 
 const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
@@ -92,11 +93,12 @@ function handleLine(line) {
   if (parts.length < 2) return;
   const a = parseFloat(parts[0]), o = parseFloat(parts[1]);
   if (!isFinite(a) || !isFinite(o)) return;
+  if (ambientFixed === null) ambientFixed = a;   // capture first reading only
   const now = performance.now() / 1000;
   if (t0 === null) t0 = now;
-  data.push({ t: now - t0, a, o });
+  data.push({ t: now - t0, a: ambientFixed, o });
   if (data.length > MAX_POINTS) data.shift();
-  $('va').textContent = fmt(a) + '°';
+  $('va').textContent = fmt(ambientFixed) + '°';
   $('vo').textContent = fmt(o) + '°';
   $('csv').disabled = false;
 }
@@ -148,8 +150,8 @@ async function disconnect() {
 }
 
 $('conn').onclick = () => keepReading ? disconnect() : connect();
-$('clear').onclick = () => { data = []; t0 = null; $('va').textContent = $('vo').textContent = '--'; $('csv').disabled = true; };
-$('csv').onclick = () => {
+$('clear').onclick = () => { data = []; t0 = null; ambientFixed = null; $('va').textContent = $('vo').textContent = '--'; $('csv').disabled = true; };
+  $('csv').onclick = () => {
   const rows = ['seconds,ambient_C,object_C', ...data.map(d => `${d.t.toFixed(2)},${d.a},${d.o}`)];
   const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
   const a = document.createElement('a');
