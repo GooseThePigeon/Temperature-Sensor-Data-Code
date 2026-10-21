@@ -52,6 +52,7 @@
       <option value="1800">30 min</option>
     </select>
   </label>
+  <label><input type="checkbox" id="lock"> Lock T1</label>
   <select id="unit" aria-label="Units"><option value="C">°C</option><option value="F">°F</option></select>
   <button id="csv" disabled>Download CSV</button>
   <button id="clear">Clear</button>
@@ -59,8 +60,8 @@
 </header>
 
 <div class="readouts">
-  <div class="readout obj"><b id="vo">--</b><span>Object</span></div>
-  <div class="readout amb"><b id="va">--</b><span>Ambient</span></div>
+  <div class="readout amb"><b id="va">--</b><span>T1</span></div>
+  <div class="readout obj"><b id="vo">--</b><span>T2</span></div>
 </div>
 
 <div class="chart"><canvas id="cv"></canvas></div>
@@ -91,14 +92,15 @@ const fmt = c => conv(c).toFixed(1);
 function handleLine(line) {
   const parts = line.trim().split(',');
   if (parts.length < 2) return;
-  const a = parseFloat(parts[0]), o = parseFloat(parts[1]);
-  if (!isFinite(a) || !isFinite(o)) return;
-  if (ambientFixed === null) ambientFixed = a;   // capture first reading only
+  const raw = parseFloat(parts[0]), o = parseFloat(parts[1]);
+  if (!isFinite(raw) || !isFinite(o)) return;
+  if ($('lock').checked && ambientFixed === null) ambientFixed = raw;  // capture first reading after locking
+  const a = $('lock').checked ? ambientFixed : raw;
   const now = performance.now() / 1000;
   if (t0 === null) t0 = now;
-  data.push({ t: now - t0, a: ambientFixed, o });
+  data.push({ t: now - t0, a, o });
   if (data.length > MAX_POINTS) data.shift();
-  $('va').textContent = fmt(ambientFixed) + '°';
+  $('va').textContent = fmt(a) + '°';
   $('vo').textContent = fmt(o) + '°';
   $('csv').disabled = false;
 }
@@ -152,14 +154,15 @@ async function disconnect() {
 $('conn').onclick = () => keepReading ? disconnect() : connect();
 $('clear').onclick = () => { data = []; t0 = null; ambientFixed = null; $('va').textContent = $('vo').textContent = '--'; $('csv').disabled = true; };
   $('csv').onclick = () => {
-  const rows = ['seconds,ambient_C,object_C', ...data.map(d => `${d.t.toFixed(2)},${d.a},${d.o}`)];
+  const rows = ['seconds,T1_C,T2_C', ...data.map(d => `${d.t.toFixed(2)},${d.a},${d.o}`)];
   const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
   const a = document.createElement('a');
   a.href = url; a.download = 'ir-sensor-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.csv';
   a.click(); URL.revokeObjectURL(url);
 };
 $('unit').onchange = () => { const d = data[data.length - 1]; if (d) { $('va').textContent = fmt(d.a) + '°'; $('vo').textContent = fmt(d.o) + '°'; } };
-
+$('lock').onchange = () => { if (!$('lock').checked) ambientFixed = null; };
+  
 // ---- drawing ----
 function niceStep(range) {
   const raw = range / 5, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
