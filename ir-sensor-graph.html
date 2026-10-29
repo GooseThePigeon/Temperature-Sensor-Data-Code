@@ -3,15 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IR Sensor Graph</title>
+<title>Temperature Graph</title>
 <style>
   :root {
     --bg: #f5f7f8; --panel: #ffffff; --ink: #1c2529; --muted: #5f6d73;
-    --grid: #e1e6e8; --amb: #2f7fb5; --obj: #d2452b; --ok: #2e8b57; --line: #cfd6d9;
+    --grid: #e1e6e8; --ok: #2e8b57; --line: #cfd6d9; --err: #d2452b;
+    --c1: #2f7fb5; --c2: #d2452b; --c3: #2e8b57; --c4: #b8860b;
+    --c5: #7b52ab; --c6: #1b998b; --c7: #c2579a; --c8: #6b7280;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #14191c; --panel: #1c2327; --ink: #e8edef; --muted: #93a1a8;
-            --grid: #2b353a; --amb: #5ea9dc; --obj: #ff7a5c; --ok: #4cc58a; --line: #37434a; }
+            --grid: #2b353a; --ok: #4cc58a; --line: #37434a; --err: #ff7a5c;
+            --c1: #5ea9dc; --c2: #ff7a5c; --c3: #4cc58a; --c4: #e0b84a;
+            --c5: #a98bdc; --c6: #4fd1c1; --c7: #e88bc4; --c8: #a3adb5; }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -25,24 +29,26 @@
   button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line);
            background: var(--panel); color: var(--ink); cursor: pointer; }
   button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-  button:focus-visible, select:focus-visible { outline: 3px solid var(--amb); outline-offset: 2px; }
+  button:focus-visible, select:focus-visible { outline: 3px solid var(--c1); outline-offset: 2px; }
   button:disabled { opacity: .5; cursor: default; }
   select { font: inherit; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--line);
            background: var(--panel); color: var(--ink); }
-  .readouts { display: flex; flex-wrap: wrap; gap: 24px; }
-  .readout b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .readouts { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  .readout { background: none; border: 0; padding: 2px 0; text-align: left; color: inherit; }
+  .readout b { display: block; font-size: 2rem; font-variant-numeric: tabular-nums; line-height: 1.1; color: var(--c); }
   .readout span { color: var(--muted); font-size: .9rem; }
-  .readout.amb b { color: var(--amb); } .readout.obj b { color: var(--obj); }
+  .readout.off { opacity: .4; }
+  .readout.off span { text-decoration: line-through; }
   .chart { flex: 1; min-height: 240px; background: var(--panel); border: 1px solid var(--line);
            border-radius: 8px; position: relative; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   #msg { color: var(--muted); font-size: .9rem; min-height: 1.3em; }
-  #msg.err { color: var(--obj); }
+  #msg.err { color: var(--err); }
 </style>
 </head>
 <body>
 <header>
-  <h1>IR sensor temperature</h1>
+  <h1>Temperature graph</h1>
   <div class="status"><span class="dot" id="dot"></span><span id="state">Not connected</span></div>
   <label>Window
     <select id="win">
@@ -59,25 +65,27 @@
   <button id="conn" class="primary">Connect sensor</button>
 </header>
 
-<div class="readouts">
-  <div class="readout amb"><b id="va">--</b><span>T1</span></div>
-  <div class="readout obj"><b id="vo">--</b><span>T2</span></div>
-</div>
+<div class="readouts" id="readouts"></div>
 
 <div class="chart"><canvas id="cv"></canvas></div>
-<div id="msg">Plug in the Arduino, then select Connect sensor and choose its port.</div>
+<div id="msg">Plug in the Arduino, then select Connect sensor and choose its port. Click a readout to hide or show its line.</div>
 
 <script>
 const BAUD = 9600;            // must match Serial.begin() in the sketch
 const MAX_POINTS = 200000;
+const NUM = /^-?\d+(\.\d+)?$/; // strict number check for each field
+const PALETTE = 8;             // number of --c1..--c8 colors; channels cycle through them
 let port, reader, keepReading = false;
-let data = [];                  // {t: seconds since start, a: ambient C, o: object C}
+let data = [];                  // {t: seconds since start, v: [T1, T2, ..., TN] in C}
 let t0 = null;
-let ambientFixed = null;        // first ambient reading, then locked
+let n = null;                   // channel count, set by the first valid line
+let t1Fixed = null;             // first T1 reading while "Lock T1" is checked
+const hidden = new Set();       // channel indexes hidden from the graph
 
 const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
-const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const colorVar = i => '--c' + (i % PALETTE + 1);
 
 function setState(on, text) {
   $('dot').classList.toggle('on', on);
@@ -89,19 +97,44 @@ function msg(text, err) { const m = $('msg'); m.textContent = text; m.classList.
 const conv = c => $('unit').value === 'F' ? c * 9 / 5 + 32 : c;
 const fmt = c => conv(c).toFixed(1);
 
+// ---- readouts ----
+function buildReadouts() {
+  const box = $('readouts');
+  box.innerHTML = '';
+  for (let i = 0; i < (n || 0); i++) {
+    const el = document.createElement('button');
+    el.className = 'readout';
+    el.style.setProperty('--c', 'var(' + colorVar(i) + ')');
+    el.title = 'Show or hide T' + (i + 1);
+    el.innerHTML = '<b>--</b><span>T' + (i + 1) + '</span>';
+    el.onclick = () => {
+      hidden.has(i) ? hidden.delete(i) : hidden.add(i);
+      el.classList.toggle('off', hidden.has(i));
+    };
+    box.appendChild(el);
+  }
+}
+function showValues(vals) {
+  const els = $('readouts').children;
+  vals.forEach((v, i) => { if (els[i]) els[i].querySelector('b').textContent = fmt(v) + '°'; });
+}
+
+// ---- incoming data ----
 function handleLine(line) {
-  const parts = line.trim().split(',');
-  if (parts.length < 2) return;
-  const raw = parseFloat(parts[0]), o = parseFloat(parts[1]);
-  if (!isFinite(raw) || !isFinite(o)) return;
-  if ($('lock').checked && ambientFixed === null) ambientFixed = raw;  // capture first reading after locking
-  const a = $('lock').checked ? ambientFixed : raw;
+  const parts = line.trim().split(',').map(s => s.trim());
+  if (parts.length < 2 || !parts.every(p => NUM.test(p))) return;
+  const vals = parts.map(Number);
+  if (n === null) { n = vals.length; buildReadouts(); }
+  else if (vals.length !== n) return;          // ignore lines with a different channel count
+  if ($('lock').checked) {
+    if (t1Fixed === null) t1Fixed = vals[0];   // capture first reading after locking
+    vals[0] = t1Fixed;
+  }
   const now = performance.now() / 1000;
   if (t0 === null) t0 = now;
-  data.push({ t: now - t0, a, o });
+  data.push({ t: now - t0, v: vals });
   if (data.length > MAX_POINTS) data.shift();
-  $('va').textContent = fmt(a) + '°';
-  $('vo').textContent = fmt(o) + '°';
+  showValues(vals);
   $('csv').disabled = false;
 }
 
@@ -152,21 +185,26 @@ async function disconnect() {
 }
 
 $('conn').onclick = () => keepReading ? disconnect() : connect();
-$('clear').onclick = () => { data = []; t0 = null; ambientFixed = null; $('va').textContent = $('vo').textContent = '--'; $('csv').disabled = true; };
-  $('csv').onclick = () => {
-  const rows = ['seconds,T1_C,T2_C', ...data.map(d => `${d.t.toFixed(2)},${d.a},${d.o}`)];
+$('clear').onclick = () => {
+  data = []; t0 = null; n = null; t1Fixed = null; hidden.clear();
+  buildReadouts();
+  $('csv').disabled = true;
+};
+$('csv').onclick = () => {
+  const head = ['seconds', ...Array.from({ length: n }, (_, i) => 'T' + (i + 1) + '_C')];
+  const rows = [head.join(','), ...data.map(d => d.t.toFixed(2) + ',' + d.v.join(','))];
   const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' }));
   const a = document.createElement('a');
-  a.href = url; a.download = 'ir-sensor-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.csv';
+  a.href = url; a.download = 'temperature-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.csv';
   a.click(); URL.revokeObjectURL(url);
 };
-$('unit').onchange = () => { const d = data[data.length - 1]; if (d) { $('va').textContent = fmt(d.a) + '°'; $('vo').textContent = fmt(d.o) + '°'; } };
-$('lock').onchange = () => { if (!$('lock').checked) ambientFixed = null; };
-  
+$('unit').onchange = () => { const d = data[data.length - 1]; if (d) showValues(d.v); };
+$('lock').onchange = () => { if (!$('lock').checked) t1Fixed = null; };
+
 // ---- drawing ----
 function niceStep(range) {
-  const raw = range / 5, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
-  return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p;
+  const raw = range / 5, p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+  return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p;
 }
 
 function draw() {
@@ -182,9 +220,15 @@ function draw() {
   const tEnd = data.length ? Math.max(data[data.length - 1].t, span) : span;
   const tStart = tEnd - span;
   const vis = data.filter(d => d.t >= tStart - 1);
+  const shown = [];
+  for (let i = 0; i < (n || 0); i++) if (!hidden.has(i)) shown.push(i);
 
   let lo = Infinity, hi = -Infinity;
-  for (const d of vis) { lo = Math.min(lo, conv(d.a), conv(d.o)); hi = Math.max(hi, conv(d.a), conv(d.o)); }
+  for (const d of vis) for (const i of shown) {
+    const y = conv(d.v[i]);
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
+  }
   if (!isFinite(lo)) { lo = 20; hi = 30; }
   if (hi - lo < 2) { const m = (hi + lo) / 2; lo = m - 1; hi = m + 1; }
   const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
@@ -211,9 +255,9 @@ function draw() {
 
   ctx.save(); ctx.beginPath(); ctx.rect(L, T, pw, ph); ctx.clip();
   ctx.lineWidth = 2; ctx.lineJoin = 'round';
-  for (const [key, color] of [['a', '--amb'], ['o', '--obj']]) {
-    ctx.strokeStyle = css(color); ctx.beginPath();
-    vis.forEach((d, i) => { const x = X(d.t), y = Y(conv(d[key])); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  for (const i of shown) {
+    ctx.strokeStyle = css(colorVar(i)); ctx.beginPath();
+    vis.forEach((d, k) => { const x = X(d.t), y = Y(conv(d.v[i])); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
     ctx.stroke();
   }
   ctx.restore();
