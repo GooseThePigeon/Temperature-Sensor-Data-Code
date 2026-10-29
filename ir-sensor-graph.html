@@ -59,7 +59,7 @@
     </select>
   </label>
   <label><input type="checkbox" id="lock"> Lock T1</label>
-  <select id="unit" aria-label="Units"><option value="C">°C</option><option value="F">°F</option></select>
+  <select id="unit" aria-label="Units"><option value="C">°C</option><option value="K">K</option><option value="F">°F</option></select>
   <button id="csv" disabled>Download CSV</button>
   <button id="clear">Clear</button>
   <button id="conn" class="primary">Connect sensor</button>
@@ -94,7 +94,10 @@ function setState(on, text) {
 }
 function msg(text, err) { const m = $('msg'); m.textContent = text; m.classList.toggle('err', !!err); }
 
-const conv = c => $('unit').value === 'F' ? c * 9 / 5 + 32 : c;
+const conv = c => {
+  const u = $('unit').value;
+  return u === 'F' ? c * 9 / 5 + 32 : u === 'K' ? c + 273.15 : c;
+};
 const fmt = c => conv(c).toFixed(1);
 
 // ---- readouts ----
@@ -116,7 +119,7 @@ function buildReadouts() {
 }
 function showValues(vals) {
   const els = $('readouts').children;
-  vals.forEach((v, i) => { if (els[i]) els[i].querySelector('b').textContent = fmt(v) + '°'; });
+vals.forEach((v, i) => { if (els[i]) els[i].querySelector('b').textContent = fmt(v) + ($('unit').value === 'K' ? ' K' : '°'); });
 }
 
 // ---- incoming data ----
@@ -134,7 +137,7 @@ function handleLine(line) {
   if (t0 === null) t0 = now;
   data.push({ t: now - t0, v: vals });
   if (data.length > MAX_POINTS) data.shift();
-  showValues(vals);
+    showValues(vals);
   $('csv').disabled = false;
 }
 
